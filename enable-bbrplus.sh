@@ -1,10 +1,12 @@
 #!/bin/bash
 #
-# BBR Plus + FQ/FQ_PIE/CAKE 强制启用器 - 守护增强版
-# 支持多种启动方式，并提供守护模式以对抗配置覆盖，确保BBR Plus在任何情况下都能正常启用
+# BBR Plus + CAKE 强制启用器 - 守护增强版 v3.1
+# 集成守护模式，专为对抗 Hiddify 等面板的配置覆盖问题
+#
+# 由 Gemini 根据用户需求完善
 #
 # 使用方法:
-# curl -fsSL https://raw.githubusercontent.com/your-username/bbrplus-enabler/main/enable-bbrplus.sh | bash
+# bash <(curl -fsSL https://raw.githubusercontent.com/vpn3288/bbrplus-enabler/main/enable-bbrplus.sh)
 #
 
 set -e
@@ -19,7 +21,7 @@ MAGENTA="\033[35m"
 RESET="\033[0m"
 
 # 脚本版本
-VERSION="3.0.0-guardian"
+VERSION="3.1.0-Guardian"
 
 # 检测发行版
 detect_os() {
@@ -52,19 +54,10 @@ check_root() {
 # 检查BBR Plus支持
 check_bbrplus() {
     log "${BLUE}🔍 检查 BBR Plus 内核支持...${RESET}"
-    
-    local algo=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "")
-    local current=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "")
-    
-    echo "当前拥塞控制算法: $current"
-    echo "可用拥塞控制算法: $algo"
-    
-    if ! echo "$algo" | grep -qw "bbrplus"; then
+    if ! sysctl net.ipv4.tcp_available_congestion_control | grep -q "bbrplus"; then
         echo -e "${RED}❌ 当前系统未检测到 BBR Plus 支持${RESET}"
-        echo -e "${YELLOW}💡 请确保已安装支持 BBR Plus 的内核${RESET}"
-        echo -e "${YELLOW}   常见的内核包括: xanmod, liquorix, 或自编译内核${RESET}"
-        
-        read -p "是否继续配置？某些方法可能在重启后生效 (y/N): " continue_setup
+        echo -e "${YELLOW}💡 请确保已安装支持 BBR Plus 的内核 (如 xanmod, liquorix)${RESET}"
+        read -p "是否继续配置？ (y/N): " continue_setup
         if [[ ! $continue_setup =~ ^[Yy] ]]; then
             exit 1
         fi
@@ -73,34 +66,22 @@ check_bbrplus() {
     fi
 }
 
-# 检查FQ_PIE支持
-check_fqpie() {
-    log "${BLUE}🔍 检查 FQ_PIE 队列规程支持...${RESET}"
-    local current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "")
-    echo "当前队列规程: $current_qdisc"
-    
-    if lsmod | grep -q sch_fq_pie || modinfo sch_fq_pie >/dev/null 2>&1; then
-        echo -e "${GREEN}✅ 检测到 FQ_PIE 队列规程支持${RESET}"
-    else
-        echo -e "${YELLOW}⚠️ 未检测到 FQ_PIE 模块，尝试加载...${RESET}"
-        modprobe sch_fq_pie 2>/dev/null || echo -e "${RED}❌ 无法加载 FQ_PIE 模块${RESET}"
-    fi
-}
-
-##### 新增：检查CAKE支持 #####
+# 检查CAKE支持
 check_cake() {
     log "${BLUE}🔍 检查 CAKE 队列规程支持...${RESET}"
-    local current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "")
-    echo "当前队列规程: $current_qdisc"
-
-    if lsmod | grep -q sch_cake || modinfo sch_cake >/dev/null 2>&1; then
+    if modinfo sch_cake >/dev/null 2>&1; then
         echo -e "${GREEN}✅ 检测到 CAKE 队列规程支持${RESET}"
     else
-        echo -e "${YELLOW}⚠️ 未检测到 CAKE 模块，尝试加载...${RESET}"
-        if modprobe sch_cake 2>/dev/null; then
-            echo -e "${GREEN}✅ CAKE 模块加载成功${RESET}"
+        echo -e "${YELLOW}⚠️ 未检测到 CAKE 模块。CAKE 通常需要内核 4.19+${RESET}"
+        read -p "守护模式需要 CAKE，是否尝试加载模块？(Y/n): " load_cake
+        if [[ ! "$load_cake" =~ ^[Nn]$ ]]; then
+            if modprobe sch_cake; then
+                 echo -e "${GREEN}✅ CAKE 模块加载成功!${RESET}"
+            else
+                 echo -e "${RED}❌ 无法加载 CAKE 模块，守护模式无法继续。${RESET}"
+                 return 1
+            fi
         else
-            echo -e "${RED}❌ 无法加载 CAKE 模块。请确保内核版本高于 4.19。${RESET}"
             return 1
         fi
     fi
@@ -108,84 +89,40 @@ check_cake() {
 
 # 备份现有配置
 backup_configs() {
-    log "${YELLOW}📦 备份现有配置...${RESET}"
+    log "${YELLOW}📦 备份现有 sysctl 配置...${RESET}"
     local backup_dir="/root/bbrplus-backup-$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$backup_dir"
-    
-    # 备份相关配置文件
-    [ -f /etc/sysctl.conf ] && cp /etc/sysctl.conf "$backup_dir/"
-    [ -d /etc/sysctl.d ] && cp -r /etc/sysctl.d "$backup_dir/"
-    [ -f /etc/default/grub ] && cp /etc/default/grub "$backup_dir/"
-    [ -f /etc/rc.local ] && cp /etc/rc.local "$backup_dir/"
-    
-    echo "配置已备份到: $backup_dir"
+    if [ -d /etc/sysctl.d ]; then
+        cp -r /etc/sysctl.d "$backup_dir/"
+        echo "配置已备份到: $backup_dir"
+    fi
 }
 
-# 方法1-FQ_PIE: sysctl配置文件 (FQ_PIE模式)
-sysctl_method_fqpie() {
-    log "${YELLOW}>>> 方法1-FQ_PIE: 配置 sysctl 启用 BBR Plus + FQ_PIE${RESET}"
-    cat > /etc/sysctl.d/99-bbrplus-fqpie.conf <<'EOF'
-# BBR Plus + FQ_PIE Configuration
-net.core.default_qdisc = fq_pie
-net.ipv4.tcp_congestion_control = bbrplus
-EOF
-    sysctl -p /etc/sysctl.d/99-bbrplus-fqpie.conf >/dev/null 2>&1 || true
-    echo -e "${GREEN}✅ sysctl (FQ_PIE模式) 配置完成${RESET}"
-}
+# BBR Plus + CAKE 守护模式
+guardian_method() {
+    log "${MAGENTA}🔥 启用 BBR Plus + CAKE 守护模式 (对抗配置覆盖)...${RESET}"
 
-##### 新增：sysctl配置 (CAKE模式) #####
-sysctl_method_cake() {
-    log "${YELLOW}>>> 方法1-CAKE: 配置 sysctl 启用 BBR Plus + CAKE${RESET}"
-    cat > /etc/sysctl.d/99-bbrplus-cake.conf <<'EOF'
-# BBR Plus + CAKE Configuration
-net.core.default_qdisc = cake
-net.ipv4.tcp_congestion_control = bbrplus
-EOF
-    sysctl -p /etc/sysctl.d/99-bbrplus-cake.conf >/dev/null 2>&1 || true
-    echo -e "${GREEN}✅ sysctl (CAKE模式) 配置完成${RESET}"
-}
-
-##### 新增：守护模式 (Guardian Mode) - 解决Hiddify等软件冲突的核心方案 #####
-guardian_method_cake() {
-    log "${RED}>>> 核心功能: 创建 BBR Plus + CAKE 守护服务 (对抗配置覆盖)${RESET}"
-
-    # 1. 创建循环检测修复脚本
+    # 1. 创建守护脚本
     log "   - 创建守护脚本 /usr/local/bin/bbrplus-cake-guardian.sh"
     cat > /usr/local/bin/bbrplus-cake-guardian.sh <<'EOF'
 #!/bin/bash
-# This script is a guardian to ensure BBR Plus and Cake qdisc remain active.
-# It's designed to counteract other services that might override network settings.
+# BBRPlus & Cake Guardian Script
+# Ensures BBR Plus and Cake are always active, counteracting overrides.
 
-LOG_FILE="/var/log/bbrplus-guardian.log"
 DESIRED_QDISC="cake"
 DESIRED_CC="bbrplus"
 
-log_change() {
-    echo "$(date): $1" >> "$LOG_FILE"
-}
-
-# Load module just in case
+# Ensure module is loaded
 /sbin/modprobe sch_cake 2>/dev/null
 
 while true; do
-    # Read current values directly from procfs for accuracy
-    current_qdisc=$(cat /proc/sys/net/core/default_qdisc)
-    current_cc=$(cat /proc/sys/net/ipv4/tcp_congestion_control)
-    
-    # Check and fix qdisc
-    if [ "$current_qdisc" != "$DESIRED_QDISC" ]; then
-        echo "$DESIRED_QDISC" > /proc/sys/net/core/default_qdisc
-        log_change "Qdisc reverted from '$current_qdisc' to '$DESIRED_QDISC'."
+    if [[ "$(sysctl -n net.core.default_qdisc)" != "$DESIRED_QDISC" ]]; then
+        sysctl -w net.core.default_qdisc="$DESIRED_QDISC" >/dev/null 2>&1
     fi
-    
-    # Check and fix congestion control
-    if [ "$current_cc" != "$DESIRED_CC" ]; then
-        echo "$DESIRED_CC" > /proc/sys/net/ipv4/tcp_congestion_control
-        log_change "Congestion control reverted from '$current_cc' to '$DESIRED_CC'."
+    if [[ "$(sysctl -n net.ipv4.tcp_congestion_control)" != "$DESIRED_CC" ]]; then
+        sysctl -w net.ipv4.tcp_congestion_control="$DESIRED_CC" >/dev/null 2>&1
     fi
-    
-    # Check every 5 seconds - more responsive than 10
-    sleep 5
+    sleep 10
 done
 EOF
 
@@ -197,7 +134,7 @@ EOF
     log "   - 创建 systemd 服务 /etc/systemd/system/bbrplus-guardian.service"
     cat > /etc/systemd/system/bbrplus-guardian.service <<'EOF'
 [Unit]
-Description=BBRPlus and Cake Qdisc Guardian
+Description=BBRPlus and Cake Qdisc Guardian (to counteract Hiddify overrides)
 After=network-online.target
 Wants=network-online.target
 
@@ -219,43 +156,35 @@ EOF
     systemctl start bbrplus-guardian.service
 
     echo -e "${GREEN}✅ BBR Plus + CAKE 守护服务已启动并设为开机自启${RESET}"
-    echo -e "${YELLOW}💡 此服务将持续运行，确保 Hiddify 等软件无法修改您的 BBR Plus 和 CAKE 设置。${RESET}"
-    echo -e "${YELLOW}   可以用 'systemctl status bbrplus-guardian' 来检查其运行状态。${RESET}"
+    echo -e "${YELLOW}💡 此服务将持续运行，确保 Hiddify 等软件无法修改您的网络设置。${RESET}"
 }
-
 
 # 检查当前状态
 check_status() {
     log "${BLUE}📊 当前系统状态:${RESET}"
-    echo "======================================"
-    local cc_algo k_qdisc fq_pie_mod cake_mod guardian_status
+    echo "=================================================="
+    local cc_algo k_qdisc guardian_status
     cc_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '未知')
     k_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo '未知')
-    
-    echo "当前拥塞控制算法: $([ "$cc_algo" = "bbrplus" ] && echo -e "${GREEN}$cc_algo${RESET}" || echo -e "${RED}$cc_algo${RESET}")"
-    echo "当前队列规程: $([ "$k_qdisc" = "cake" ] || [ "$k_qdisc" = "fq_pie" ] && echo -e "${GREEN}$k_qdisc${RESET}" || echo -e "${RED}$k_qdisc${RESET}")"
-    echo "可用拥塞控制算法: $(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo '未知')"
-    echo "内核版本: $(uname -r)"
-    
-    # 检查模块
-    lsmod | grep -q sch_fq_pie && fq_pie_mod="${GREEN}✅ 已加载${RESET}" || fq_pie_mod="${RED}❌ 未加载${RESET}"
-    lsmod | grep -q sch_cake && cake_mod="${GREEN}✅ 已加载${RESET}" || cake_mod="${RED}❌ 未加载${RESET}"
-    echo "FQ_PIE 模块状态: $fq_pie_mod"
-    echo "CAKE 模块状态:   $cake_mod"
 
-    # 检查守护服务状态
-    if systemctl is-active --quiet bbrplus-guardian; then
+    echo -n "拥塞控制: "
+    [ "$cc_algo" = "bbrplus" ] && echo -e "${GREEN}$cc_algo${RESET}" || echo -e "${RED}$cc_algo${RESET}"
+    echo -n "队列规程:   "
+    [ "$k_qdisc" = "cake" ] && echo -e "${GREEN}$k_qdisc${RESET}" || echo -e "${RED}$k_qdisc${RESET}"
+
+    if systemctl is-active --quiet bbrplus-guardian.service; then
         guardian_status="${GREEN}✅ 运行中${RESET}"
     else
         guardian_status="${RED}❌ 未运行${RESET}"
     fi
-    echo "守护服务状态:     $guardian_status"
-    echo "======================================"
+    echo "守护服务:   $guardian_status"
+    echo "内核版本:   $(uname -r)"
+    echo "=================================================="
 }
 
 # 清理配置
 cleanup_configs() {
-    log "${YELLOW}🧹 清理 BBR Plus 相关配置...${RESET}"
+    log "${YELLOW}🧹 清理所有 BBR Plus 相关配置...${RESET}"
     
     # 停止并禁用守护服务
     log "   - 停止并移除守护服务..."
@@ -263,20 +192,17 @@ cleanup_configs() {
     systemctl disable bbrplus-guardian.service >/dev/null 2>&1 || true
     rm -f /etc/systemd/system/bbrplus-guardian.service
     rm -f /usr/local/bin/bbrplus-cake-guardian.sh
-    systemctl daemon-reload
+    systemctl daemon-reload >/dev/null 2>&1
 
-    # 删除sysctl配置文件
-    rm -f /etc/sysctl.d/99-bbrplus-fq.conf
-    rm -f /etc/sysctl.d/99-bbrplus-fqpie.conf
-    rm -f /etc/sysctl.d/99-bbrplus-cake.conf
-    
-    # ... (此处省略原始脚本中其他清理项，为简洁起见，实际使用时应保留)
+    # 删除所有可能的 sysctl 配置文件
+    rm -f /etc/sysctl.d/99-bbrplus*.conf
     
     # 恢复系统默认值
+    log "   - 尝试恢复系统默认网络配置 (cubic + fq)..."
     sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
     sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1
     
-    echo -e "${GREEN}✅ 清理完成，已尝试恢复系统默认网络配置 (cubic + fq)。${RESET}"
+    echo -e "${GREEN}✅ 清理完成。${RESET}"
 }
 
 # 主菜单
@@ -289,56 +215,54 @@ menu() {
     echo ""
     check_status
     echo ""
-    echo -e "${MAGENTA}== 终极稳定模式 (推荐，可对抗Hiddify) ==${RESET}"
-    echo -e "  ${RED}1${RESET}) 🔥 BBR Plus + CAKE (守护模式)"
-    echo -e "         ${CYAN}通过持续守护进程强制锁定配置，确保永不失效。${RESET}"
-    echo ""
-    echo -e "${YELLOW}== 标准模式 (可能被Hiddify覆盖) ==${RESET}"
-    echo -e "  ${YELLOW}11${RESET}) BBR Plus + FQ_PIE (sysctl方式)"
-    echo -e "  ${YELLOW}12${RESET}) BBR Plus + CAKE (sysctl方式)"
+    echo -e "${MAGENTA}== 终极守护模式 (强烈推荐，对抗Hiddify) ==${RESET}"
+    echo -e "  ${GREEN}1)${RESET} 🔥 启用 BBR Plus + CAKE 守护模式"
+    echo -e "         ${CYAN}通过后台服务持续强制锁定配置，确保永不失效。${RESET}"
     echo ""
     echo -e "${BLUE}== 系统管理 ==${RESET}"
-    echo -e "  ${BLUE}9${RESET}) 📊 刷新当前状态"
-    echo -e "  ${RED}c${RESET}) 🧹 清理所有配置并恢复默认"
-    echo -e "  ${RED}q${RESET}) 退出"
+    echo -e "  ${BLUE}9)${RESET} 📊 刷新当前状态"
+    echo -e "  ${RED}c)${RESET} 🧹 清理所有配置并恢复默认"
+    echo -e "  ${RED}q)${RESET} 退出脚本"
     echo ""
-    read -p "请输入选择: " option
+    read -p "请输入您的选择: " option
     
     case "$option" in
         1)
-            check_bbrplus && check_cake && backup_configs && guardian_method_cake
-            ;;
-        11)
-            check_bbrplus && check_fqpie && backup_configs && sysctl_method_fqpie
-            ;;
-        12)
-            check_bbrplus && check_cake && backup_configs && sysctl_method_cake
+            check_bbrplus && check_cake && backup_configs && guardian_method
             ;;
         9)
-            menu
+            # 只是为了刷新状态，不需要任何操作，因为菜单会重新调用check_status
             ;;
         c|C)
-            cleanup_configs && read -p "按回车键继续..." && menu
+            read -p "确定要清理所有配置吗? 这会停止守护服务并恢复系统默认值 (y/N): " confirm_cleanup
+            if [[ "$confirm_cleanup" =~ ^[Yy]$ ]]; then
+                cleanup_configs
+            else
+                echo "操作已取消。"
+            fi
             ;;
         q|Q)
             echo -e "${CYAN}👋 感谢使用!${RESET}"; exit 0
             ;;
         *)
-            echo -e "${RED}❌ 无效输入，请重试${RESET}"; sleep 2; menu
+            echo -e "${RED}❌ 无效输入，请重试${RESET}"; sleep 2;
             ;;
     esac
     
     echo ""
-    log "${GREEN}✅ 操作完成!${RESET}"
-    echo ""
-    read -p "按回车键返回主菜单..."
+    read -p "按任意键返回主菜单..."
     menu
 }
-
 
 # 脚本入口
 main() {
     check_root
+    detect_os
+    # 初始检查，如果守护服务已存在但未运行，尝试启动它
+    if [ -f /etc/systemd/system/bbrplus-guardian.service ] && ! systemctl is-active --quiet bbrplus-guardian.service; then
+        log "${YELLOW}检测到守护服务存在但未运行，尝试启动...${RESET}"
+        systemctl start bbrplus-guardian.service >/dev/null 2>&1 || true
+    fi
     menu
 }
 
