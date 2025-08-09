@@ -416,5 +416,3 @@ main() {
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"
 fi
-Commit message: Add BBR Plus enabler script
-Description: Initial version with multiple enable methods
