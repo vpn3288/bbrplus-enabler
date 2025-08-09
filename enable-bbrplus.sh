@@ -38,49 +38,48 @@ case "$qchoice" in
     ;;
 esac
 
-echo -e "${YELLOW}== 写入 sysctl 配置 ==${RESET}"
+echo -e "${YELLOW}== 清理冲突的 sysctl 配置（net.ipv4.tcp_congestion_control 和 net.core.default_qdisc） ==${RESET}"
+conf_files=$(grep -rlE 'net\.ipv4\.tcp_congestion_control|net\.core\.default_qdisc' /etc/sysctl.d/ || true)
+for file in $conf_files; do
+  echo "处理文件：$file"
+  # 备份
+  cp "$file" "$file.bak.$(date +%F-%T)"
+  # 注释掉冲突的行
+  sed -i '/net\.ipv4\.tcp_congestion_control/d' "$file"
+  sed -i '/net\.core\.default_qdisc/d' "$file"
+done
+
+echo -e "${YELLOW}== 写入指定的 sysctl 配置文件 /etc/sysctl.d/99-bbrplus.conf ==${RESET}"
 cat > /etc/sysctl.d/99-bbrplus.conf <<EOF
 net.core.default_qdisc = $qdisc_choice
 net.ipv4.tcp_congestion_control = bbrplus
 EOF
+
+echo -e "${YELLOW}== 重新加载 sysctl 配置 ==${RESET}"
 sysctl --system
 
-echo -e "${YELLOW}== 修改 grub 启动参数（适用于 grub 系统） ==${RESET}"
+echo -e "${YELLOW}== 简单检测并修复 /etc/default/grub 语法错误（修复 GRUB_CMDLINE_LINUX 行）==${RESET}"
 if [ -f /etc/default/grub ]; then
   cp /etc/default/grub /etc/default/grub.bak.$(date +%F-%T)
-  sed -i 's/ net.core.default_qdisc=[^ ]*//g' /etc/default/grub
-  sed -i 's/ net.ipv4.tcp_congestion_control=[^ ]*//g' /etc/default/grub
-  sed -i "s/^GRUB_CMDLINE_LINUX=\"\(.*\)\"/GRUB_CMDLINE_LINUX=\"\1 net.core.default_qdisc=$qdisc_choice net.ipv4.tcp_congestion_control=bbrplus\"/" /etc/default/grub
-  echo -e "${YELLOW}更新 grub 配置...${RESET}"
-  update-grub
+  
+  # 提取原有 GRUB_CMDLINE_LINUX 内容（去除前后引号）
+  old_cmdline=$(grep "^GRUB_CMDLINE_LINUX=" /etc/default/grub | head -n1 | sed -E 's/^GRUB_CMDLINE_LINUX="(.*)"$/\1/' || echo "")
+  
+  # 过滤掉旧的相关参数
+  new_cmdline=$(echo "$old_cmdline" | sed -E 's/(net\.core\.default_qdisc=[^ ]+)//g; s/(net\.ipv4\.tcp_congestion_control=[^ ]+)//g' | xargs)
+  
+  # 新参数加入
+  new_cmdline="$new_cmdline net.core.default_qdisc=$qdisc_choice net.ipv4.tcp_congestion_control=bbrplus"
+  
+  # 用安全的方式替换整行
+  sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=\"$new_cmdline\"|" /etc/default/grub
+  
+  echo -e "${GREEN}/etc/default/grub 修复完成。请确认无语法错误后手动执行：sudo update-grub${RESET}"
 else
-  echo -e "${RED}未检测到 grub 配置，跳过 grub 启动参数修改${RESET}"
+  echo -e "${RED}未检测到 /etc/default/grub 文件，跳过 grub 修复${RESET}"
 fi
 
-echo -e "${YELLOW}== 写入 /etc/rc.local（兼容老系统） ==${RESET}"
-if [ ! -f /etc/rc.local ]; then
-  cat > /etc/rc.local <<EOF
-#!/bin/bash
-exit 0
-EOF
-  chmod +x /etc/rc.local
-fi
-sed -i '/default_qdisc/d' /etc/rc.local
-sed -i '/tcp_congestion_control/d' /etc/rc.local
-sed -i '/exit 0/d' /etc/rc.local
-echo "sysctl -w net.core.default_qdisc=$qdisc_choice" >> /etc/rc.local
-echo "sysctl -w net.ipv4.tcp_congestion_control=bbrplus" >> /etc/rc.local
-echo "exit 0" >> /etc/rc.local
-
-echo -e "${YELLOW}== modprobe 预加载 tcp_bbrplus 模块（部分内核支持） ==${RESET}"
-if ! grep -q "tcp_bbrplus" /etc/modules-load.d/bbrplus.conf 2>/dev/null; then
-  echo "tcp_bbrplus" > /etc/modules-load.d/bbrplus.conf
-  modprobe tcp_bbrplus || echo -e "${RED}modprobe tcp_bbrplus 加载失败，可能内核不支持该模块${RESET}"
-else
-  echo "modprobe 配置已存在"
-fi
-
-echo -e "${YELLOW}== 创建持续守护 systemd 服务，防止被覆盖 ==${RESET}"
+echo -e "${YELLOW}== 创建持续守护服务，防止其他程序覆盖 bbrplus 设置 ==${RESET}"
 
 cat >/usr/local/bin/force-bbrplus.sh <<EOF
 #!/bin/bash
@@ -121,7 +120,8 @@ systemctl enable force-bbrplus
 systemctl restart force-bbrplus
 
 echo ""
-echo -e "${GREEN}配置完成！当前拥塞控制算法：$(sysctl -n net.ipv4.tcp_congestion_control)${RESET}"
+echo -e "${GREEN}当前拥塞控制算法：$(sysctl -n net.ipv4.tcp_congestion_control)${RESET}"
 echo -e "${GREEN}当前默认队列类型：$(sysctl -n net.core.default_qdisc)${RESET}"
 echo ""
-echo -e "${YELLOW}请重启系统以确保 grub 启动参数生效，执行命令：${RESET}reboot"
+echo -e "${YELLOW}请确认 /etc/default/grub 无语法错误后，执行：${RESET}sudo update-grub"
+echo -e "${YELLOW}然后重启生效：${RESET}sudo reboot"
