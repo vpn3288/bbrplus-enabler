@@ -1,3 +1,5 @@
+# 创建脚本文件
+cat > enable-bbrplus.sh << 'SCRIPT_END'
 #!/bin/bash
 #
 # BBR Plus 强制启用器 - 增强版
@@ -416,3 +418,10 @@ main() {
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"
 fi
+SCRIPT_END
+
+# 添加执行权限
+chmod +x enable-bbrplus.sh
+
+# 运行脚本
+./enable-bbrplus.sh
